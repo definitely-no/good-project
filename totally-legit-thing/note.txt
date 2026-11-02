@@ -1,0 +1,20 @@
+Windows 11 Core OS Source Reconstruction
+Target: Windows 11 Build 26300.9457 (ge_release, amd64)
+
+Build / Syntax Verification:
+  make
+or manually:
+  gcc -fsyntax-only -I include $(find boot hal ntoskrnl -name "*.c")
+
+Project Layout:
+  include/             - Subsystem headers (ntoskrnl.h, bootmgr.h, hal.h)
+  boot/bootmgr/        - UEFI Boot Manager (bootmgfw.efi) execution flow & BCD parsing
+  hal/                 - Hardware Abstraction Layer forwarders & exports
+  ntoskrnl/ke/         - Kernel core: startup, traps, scheduling, synchronization, DPCs, syscalls
+  ntoskrnl/mm/         - Memory Manager: virtual memory, pool allocator, page faults, MDLs
+  ntoskrnl/ps/         - Process & Thread Manager: lifecycle, scheduling, CID table
+  ntoskrnl/ob/         - Object Manager: object creation, reference counting, handle resolution
+  ntoskrnl/io/         - I/O Manager: device creation, IRP allocation, driver dispatching
+  ntoskrnl/se/         - Security Reference Monitor: access checks, privileges, tokens
+  ntoskrnl/cm/         - Configuration Manager: registry filtering callbacks, keys & values
+  ntoskrnl/ex/         - Executive Subsystems: lookaside lists, performance counters, phase dispatch
