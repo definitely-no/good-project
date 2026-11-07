@@ -17,19 +17,6 @@
 #define PUSH_LOCK_WAITING  0x2ULL
 #define PUSH_LOCK_SHARED   0x10ULL
 
-static LIST_ENTRY g_ExWorkerQueues[MaximumWorkQueue];
-static bool g_ExWorkerQueuesInitialized = false;
-
-static void ExInitializeWorkQueues(void)
-{
-    ULONG i = 0;
-    for (i = 0; i < MaximumWorkQueue; i++) {
-        g_ExWorkerQueues[i].Flink = &g_ExWorkerQueues[i];
-        g_ExWorkerQueues[i].Blink = &g_ExWorkerQueues[i];
-    }
-    g_ExWorkerQueuesInitialized = true;
-}
-
 /**
  * Acquires a push lock in exclusive mode.
  * Disassembly @ 0x00194410 (RVA 0x00219410):
@@ -80,32 +67,4 @@ void ExReleasePushLockSharedEx(PEX_PUSH_LOCK PushLock, ULONG Flags)
     __atomic_sub_fetch(&PushLock->Value, PUSH_LOCK_SHARED, __ATOMIC_ACQ_REL);
 }
 
-/**
- * Enqueues a work item to an Executive worker thread pool queue.
- * Disassembly @ 0x00236DA0 (RVA 0x002BBDA0)
- */
-void ExQueueWorkItem(PWORK_QUEUE_ITEM WorkItem, WORK_QUEUE_TYPE QueueType)
-{
-    PLIST_ENTRY ListHead = NULL;
-
-    if (!WorkItem || QueueType >= MaximumWorkQueue) {
-        return;
-    }
-
-    if (!g_ExWorkerQueuesInitialized) {
-        ExInitializeWorkQueues();
-    }
-
-    ListHead = &g_ExWorkerQueues[QueueType];
-
-    /* Insert at tail of worker queue */
-    WorkItem->List.Flink = ListHead;
-    WorkItem->List.Blink = ListHead->Blink;
-    ListHead->Blink->Flink = &WorkItem->List;
-    ListHead->Blink = &WorkItem->List;
-
-    /* Execute directly or signal executive worker */
-    if (WorkItem->WorkerRoutine) {
-        WorkItem->WorkerRoutine(WorkItem->Parameter);
-    }
-}
+/* ExQueueWorkItem and worker thread management are implemented in ex_workqueue.c */

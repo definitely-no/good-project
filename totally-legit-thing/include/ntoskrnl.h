@@ -31,8 +31,10 @@
 #define STATUS_BUFFER_TOO_SMALL              0xC0000023
 #define STATUS_INSUFFICIENT_RESOURCES        0xC000009A
 #define STATUS_INVALID_PARAMETER             0xC000000D
+#define STATUS_INVALID_HANDLE                0xC0000008
 #define STATUS_NOT_SUPPORTED                 0xC00000BB
 #define STATUS_TIMEOUT                       0x00000102
+#define STATUS_PENDING                       0x00000103
 #define STATUS_ACCESS_VIOLATION              0xC0000005
 #define STATUS_DATATYPE_MISALIGNMENT         0x80000002
 #define STATUS_BREAKPOINT                    0x80000003
@@ -42,6 +44,7 @@
 #define STATUS_PRIVILEGED_INSTRUCTION        0xC0000096
 #define STATUS_IN_PAGE_ERROR                 0xC0000006
 #define STATUS_STACK_OVERFLOW                0xC00000FD
+#define STATUS_NO_TOKEN                      0xC000007C
 
 /* Object Types & Dispatcher Objects */
 #define EventNotificationObject              0
@@ -168,11 +171,36 @@ typedef uint32_t ACCESS_MASK;
 typedef uint32_t NTSTATUS;
 typedef uint8_t  KIRQL;
 typedef uint8_t  KPROCESSOR_MODE;
+
+typedef enum _MODE {
+    KernelMode = 0,
+    UserMode = 1,
+    MaximumMode
+} MODE;
+
+typedef enum _KWAIT_REASON {
+    Executive = 0,
+    FreePage = 1,
+    PageIn = 2,
+    PoolAllocation = 3,
+    DelayExecution = 4,
+    Suspended = 5,
+    UserRequest = 6,
+    WrUserRequest = UserRequest,
+    WrExecutive = Executive,
+    MaximumWaitReason
+} KWAIT_REASON;
 typedef void*    PVOID;
 typedef void*    HANDLE;
 typedef HANDLE*  PHANDLE;
-typedef uint32_t ULONG;
+typedef uint32_t ULONG, *PULONG;
 typedef int32_t  LONG, *PLONG;
+typedef uint8_t  UCHAR, *PUCHAR;
+typedef uint16_t USHORT, *PUSHORT;
+typedef int16_t  SHORT, *PSHORT;
+typedef uint64_t ULONGLONG, *PULONGLONG;
+typedef const wchar_t *PCWSTR;
+typedef wchar_t *PWSTR;
 typedef uint64_t ULONG_PTR;
 typedef uint64_t SIZE_T;
 typedef SIZE_T*  PSIZE_T;
@@ -180,6 +208,31 @@ typedef uint64_t PFN_NUMBER, *PPFN_NUMBER;
 typedef uint8_t  BOOLEAN;
 typedef uint32_t DEVICE_TYPE;
 typedef uint64_t KSPIN_LOCK, *PKSPIN_LOCK;
+
+typedef struct _RTL_BITMAP {
+    ULONG SizeOfBitMap;
+    PULONG Buffer;
+} RTL_BITMAP, *PRTL_BITMAP;
+
+typedef enum _TOKEN_TYPE {
+    TokenPrimary = 1,
+    TokenImpersonation = 2
+} TOKEN_TYPE;
+
+typedef uint8_t SECURITY_CONTEXT_TRACKING_MODE;
+typedef enum _SECURITY_IMPERSONATION_LEVEL {
+    SecurityAnonymous,
+    SecurityIdentification,
+    SecurityImpersonation,
+    SecurityDelegation
+} SECURITY_IMPERSONATION_LEVEL;
+
+typedef struct _SECURITY_QUALITY_OF_SERVICE {
+    ULONG Length;
+    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
+    SECURITY_CONTEXT_TRACKING_MODE ContextTrackingMode;
+    BOOLEAN EffectiveOnly;
+} SECURITY_QUALITY_OF_SERVICE, *PSECURITY_QUALITY_OF_SERVICE;
 
 typedef union _LARGE_INTEGER {
     struct {
@@ -193,10 +246,59 @@ typedef union _LARGE_INTEGER {
     int64_t QuadPart;
 } LARGE_INTEGER, *PLARGE_INTEGER;
 
+typedef LARGE_INTEGER PHYSICAL_ADDRESS, *PPHYSICAL_ADDRESS;
+
 typedef struct _LIST_ENTRY {
     struct _LIST_ENTRY *Flink;
     struct _LIST_ENTRY *Blink;
 } LIST_ENTRY, *PLIST_ENTRY;
+
+static inline void InitializeListHead(PLIST_ENTRY ListHead)
+{
+    ListHead->Flink = ListHead->Blink = ListHead;
+}
+
+static inline BOOLEAN IsListEmpty(const LIST_ENTRY *ListHead)
+{
+    return (BOOLEAN)(ListHead->Flink == ListHead);
+}
+
+static inline void InsertHeadList(PLIST_ENTRY ListHead, PLIST_ENTRY Entry)
+{
+    PLIST_ENTRY Flink = ListHead->Flink;
+    Entry->Flink = Flink;
+    Entry->Blink = ListHead;
+    Flink->Blink = Entry;
+    ListHead->Flink = Entry;
+}
+
+static inline void InsertTailList(PLIST_ENTRY ListHead, PLIST_ENTRY Entry)
+{
+    PLIST_ENTRY Blink = ListHead->Blink;
+    Entry->Flink = ListHead;
+    Entry->Blink = Blink;
+    Blink->Flink = Entry;
+    ListHead->Blink = Entry;
+}
+
+static inline BOOLEAN RemoveEntryList(PLIST_ENTRY Entry)
+{
+    PLIST_ENTRY Blink = Entry->Blink;
+    PLIST_ENTRY Flink = Entry->Flink;
+    Blink->Flink = Flink;
+    Flink->Blink = Blink;
+    return (BOOLEAN)(Flink == Blink);
+}
+
+static inline PLIST_ENTRY RemoveHeadList(PLIST_ENTRY ListHead)
+{
+    PLIST_ENTRY Flink = ListHead->Flink;
+    PLIST_ENTRY Entry = Flink;
+    Flink = Entry->Flink;
+    ListHead->Flink = Flink;
+    Flink->Blink = ListHead;
+    return Entry;
+}
 
 typedef struct _UNICODE_STRING {
     uint16_t Length;
@@ -392,6 +494,11 @@ typedef struct _MMPFN {
     union {
         PFN_NUMBER Flink;
         PVOID NextBlink;
+    };
+    PMMPTE PteAddress;
+    PFN_NUMBER Blink;
+    union {
+        uint64_t OriginalPte;
         struct {
             uint16_t ReferenceCount;
             uint16_t ReadInProgress : 1;
@@ -402,8 +509,6 @@ typedef struct _MMPFN {
             uint16_t CacheAttribute : 2;
         };
     };
-    PMMPTE PteAddress;
-    PFN_NUMBER Blink;
     union {
         uint64_t Unused;
         struct {
@@ -412,6 +517,9 @@ typedef struct _MMPFN {
         };
     };
 } MMPFN, *PMMPFN;
+
+PFN_NUMBER MiAllocatePfn(MMLISTS PreferredList);
+void MiFreePfn(PFN_NUMBER Pfn);
 
 /* Virtual Address Descriptor (MMVAD) */
 typedef struct _MMVAD_SHORT {
@@ -703,6 +811,7 @@ typedef struct _ETHREAD {
     EX_PUSH_LOCK ThreadRundownProtect;
     PVOID StartAddress;
     PEPROCESS Process;
+    PVOID ImpersonationInfo;
 } ETHREAD, *PETHREAD;
 
 /* Descriptor Register for SGDT / SIDT */
@@ -960,8 +1069,10 @@ struct _IO_STACK_LOCATION;
 typedef struct _IRP {
     int16_t Type;
     uint16_t Size;
+    uint32_t Reserved;
     PMDL MdlAddress;
     uint32_t Flags;
+    uint32_t Reserved2;
     union {
         struct _IRP *MasterIrp;
         int32_t IrpCount;
@@ -975,6 +1086,17 @@ typedef struct _IRP {
     int8_t CurrentLocation;
     BOOLEAN Cancel;
     uint8_t CancelIrql;
+    char ApcEnvironment;
+    uint8_t AllocationFlags;
+    PVOID UserIosb;
+    PVOID UserEvent;
+    union {
+        struct {
+            PVOID UserApcRoutine;
+            PVOID UserApcContext;
+        } AsynchronousParameters;
+        LARGE_INTEGER AllocationSize;
+    } Overlay;
     PVOID CancelRoutine;
     PVOID UserBuffer;
     union {
@@ -982,13 +1104,8 @@ typedef struct _IRP {
             PVOID DriverContext[4];
             struct _ETHREAD *Thread;
             char *AuxiliaryBuffer;
-            struct {
-                LIST_ENTRY ListEntry;
-                union {
-                    struct _IO_STACK_LOCATION *CurrentStackLocation;
-                    ULONG PacketType;
-                };
-            };
+            LIST_ENTRY ListEntry;
+            struct _IO_STACK_LOCATION *CurrentStackLocation;
             PVOID OriginalFileObject;
         } Overlay;
     } Tail;
@@ -1410,7 +1527,39 @@ typedef struct _WORK_QUEUE_ITEM {
     PVOID Parameter;
 } WORK_QUEUE_ITEM, *PWORK_QUEUE_ITEM;
 
+#define ExInitializeWorkItem(Item, Routine, Context) \
+    do { \
+        (Item)->WorkerRoutine = (Routine); \
+        (Item)->Parameter = (Context); \
+        (Item)->List.Flink = NULL; \
+        (Item)->List.Blink = NULL; \
+    } while (0)
+
 void ExQueueWorkItem(PWORK_QUEUE_ITEM WorkItem, WORK_QUEUE_TYPE QueueType);
+
+/* I/O Completion Ports */
+typedef struct _IO_COMPLETION_PACKET {
+    LIST_ENTRY ListEntry;
+    PVOID KeyContext;
+    PVOID ApcContext;
+    IO_STATUS_BLOCK IoStatus;
+} IO_COMPLETION_PACKET, *PIO_COMPLETION_PACKET;
+
+typedef struct _KQUEUE {
+    DISPATCHER_HEADER Header;
+    LIST_ENTRY EntryListHead;
+    ULONG CurrentCount;
+    ULONG MaximumCount;
+    LIST_ENTRY ThreadListHead;
+} KQUEUE, *PKQUEUE;
+
+typedef struct _IO_COMPLETION {
+    KQUEUE Queue;
+} IO_COMPLETION, *PIO_COMPLETION;
+
+NTSTATUS ZwCreateIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, ULONG Count);
+NTSTATUS ZwSetIoCompletion(HANDLE IoCompletionHandle, PVOID KeyContext, PVOID ApcContext, NTSTATUS IoStatus, ULONG_PTR IoStatusInformation);
+NTSTATUS ZwRemoveIoCompletion(HANDLE IoCompletionHandle, PVOID *KeyContext, PVOID *ApcContext, PIO_STATUS_BLOCK IoStatus, PLARGE_INTEGER Timeout);
 
 /* Push Lock Operations */
 void ExAcquirePushLockExclusiveEx(PEX_PUSH_LOCK PushLock, ULONG Flags);
@@ -1576,5 +1725,243 @@ void KeBugCheck(ULONG BugCheckCode);
 void KeBugCheckEx(ULONG BugCheckCode, ULONG_PTR Param1, ULONG_PTR Param2, ULONG_PTR Param3, ULONG_PTR Param4);
 extern BOOLEAN KdDebuggerEnabled;
 extern BOOLEAN KdDebuggerNotPresent;
+
+/* Executive Rundown Protection */
+#define EX_RUNDOWN_ACTIVE        0x1UL
+#define EX_RUNDOWN_COUNT_SHIFT   1
+#define EX_RUNDOWN_COUNT_INC     (1UL << EX_RUNDOWN_COUNT_SHIFT)
+
+typedef struct _EX_RUNDOWN_REF {
+    union {
+        ULONG_PTR Count;
+        PVOID Ptr;
+    };
+} EX_RUNDOWN_REF, *PEX_RUNDOWN_REF;
+
+typedef struct _EX_RUNDOWN_WAIT_BLOCK {
+    ULONG_PTR Count;
+    KEVENT RundownWaitEvent;
+} EX_RUNDOWN_WAIT_BLOCK, *PEX_RUNDOWN_WAIT_BLOCK;
+
+void ExInitializeRundownProtection(PEX_RUNDOWN_REF RunRef);
+BOOLEAN ExAcquireRundownProtection(PEX_RUNDOWN_REF RunRef);
+void ExReleaseRundownProtection(PEX_RUNDOWN_REF RunRef);
+void ExWaitForRundownProtectionRelease(PEX_RUNDOWN_REF RunRef);
+
+/* Executive Resources (ERESOURCE) */
+typedef struct _OWNER_ENTRY {
+    ULONG_PTR OwnerThread;
+    union {
+        LONG OwnerCount;
+        ULONG TableSize;
+    };
+} OWNER_ENTRY, *POWNER_ENTRY;
+
+typedef struct _ERESOURCE {
+    LIST_ENTRY SystemResourcesList;
+    POWNER_ENTRY OwnerTable;
+    SHORT ActiveCount;
+    USHORT Flag;
+    ULONG ReservedLow;
+    PKSEMAPHORE SharedWaiters;
+    PKEVENT ExclusiveWaiters;
+    OWNER_ENTRY OwnerEntry;
+    ULONG ActiveEntries;
+    ULONG ContentionCount;
+    ULONG NumberOfSharedWaiters;
+    ULONG NumberOfExclusiveWaiters;
+    PVOID Reserved2;
+    PVOID Address;
+    KSPIN_LOCK SpinLock;
+} ERESOURCE, *PERESOURCE;
+
+#define ResourceSharedWaiters        0x0001
+#define ResourceExclusiveWaiters     0x0002
+#define ResourceOwnedExclusive       0x0080
+
+NTSTATUS ExInitializeResourceLite(PERESOURCE Resource);
+BOOLEAN ExAcquireResourceExclusiveLite(PERESOURCE Resource, BOOLEAN Wait);
+BOOLEAN ExAcquireResourceSharedLite(PERESOURCE Resource, BOOLEAN Wait);
+void ExReleaseResourceLite(PERESOURCE Resource);
+NTSTATUS ExDeleteResourceLite(PERESOURCE Resource);
+
+/* Object Callbacks */
+#define OB_FLT_REGISTRATION_VERSION_0100 0x0100
+#define OB_OPERATION_HANDLE_CREATE       0x0001
+#define OB_OPERATION_HANDLE_DUPLICATE    0x0002
+
+typedef struct _OB_PRE_CREATE_HANDLE_INFORMATION {
+    ACCESS_MASK DesiredAccess;
+    ACCESS_MASK OriginalDesiredAccess;
+} OB_PRE_CREATE_HANDLE_INFORMATION, *POB_PRE_CREATE_HANDLE_INFORMATION;
+
+typedef struct _OB_PRE_DUPLICATE_HANDLE_INFORMATION {
+    ACCESS_MASK DesiredAccess;
+    ACCESS_MASK OriginalDesiredAccess;
+    PVOID SourceProcess;
+    PVOID TargetProcess;
+} OB_PRE_DUPLICATE_HANDLE_INFORMATION, *POB_PRE_DUPLICATE_HANDLE_INFORMATION;
+
+typedef union _OB_PRE_OPERATION_PARAMETERS {
+    OB_PRE_CREATE_HANDLE_INFORMATION CreateHandleInformation;
+    OB_PRE_DUPLICATE_HANDLE_INFORMATION DuplicateHandleInformation;
+} OB_PRE_OPERATION_PARAMETERS, *POB_PRE_OPERATION_PARAMETERS;
+
+typedef struct _OB_PRE_OPERATION_INFORMATION {
+    ULONG Operation;
+    union {
+        ULONG Flags;
+        struct {
+            ULONG KernelHandle:1;
+            ULONG Reserved:31;
+        };
+    };
+    PVOID Object;
+    POBJECT_TYPE ObjectType;
+    PVOID CallContext;
+    POB_PRE_OPERATION_PARAMETERS Parameters;
+} OB_PRE_OPERATION_INFORMATION, *POB_PRE_OPERATION_INFORMATION;
+
+typedef struct _OB_POST_CREATE_HANDLE_INFORMATION {
+    ACCESS_MASK GrantedAccess;
+} OB_POST_CREATE_HANDLE_INFORMATION, *POB_POST_CREATE_HANDLE_INFORMATION;
+
+typedef struct _OB_POST_DUPLICATE_HANDLE_INFORMATION {
+    ACCESS_MASK GrantedAccess;
+} OB_POST_DUPLICATE_HANDLE_INFORMATION, *POB_POST_DUPLICATE_HANDLE_INFORMATION;
+
+typedef union _OB_POST_OPERATION_PARAMETERS {
+    OB_POST_CREATE_HANDLE_INFORMATION CreateHandleInformation;
+    OB_POST_DUPLICATE_HANDLE_INFORMATION DuplicateHandleInformation;
+} OB_POST_OPERATION_PARAMETERS, *POB_POST_OPERATION_PARAMETERS;
+
+typedef struct _OB_POST_OPERATION_INFORMATION {
+    ULONG Operation;
+    union {
+        ULONG Flags;
+        struct {
+            ULONG KernelHandle:1;
+            ULONG Reserved:31;
+        };
+    };
+    PVOID Object;
+    POBJECT_TYPE ObjectType;
+    PVOID CallContext;
+    NTSTATUS ReturnStatus;
+    POB_POST_OPERATION_PARAMETERS Parameters;
+} OB_POST_OPERATION_INFORMATION, *POB_POST_OPERATION_INFORMATION;
+
+typedef ULONG (*POB_PRE_OPERATION_CALLBACK)(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION PreInfo);
+typedef void (*POB_POST_OPERATION_CALLBACK)(PVOID RegistrationContext, POB_POST_OPERATION_INFORMATION PostInfo);
+
+#define OB_PREOP_SUCCESS 0
+
+typedef struct _OB_OPERATION_REGISTRATION {
+    POBJECT_TYPE *ObjectType;
+    ULONG Operations;
+    POB_PRE_OPERATION_CALLBACK PreOperation;
+    POB_POST_OPERATION_CALLBACK PostOperation;
+} OB_OPERATION_REGISTRATION, *POB_OPERATION_REGISTRATION;
+
+typedef struct _OB_CALLBACK_REGISTRATION {
+    USHORT Version;
+    USHORT OperationRegistrationCount;
+    ULONG Reserved;
+    PVOID RegistrationContext;
+    UNICODE_STRING Altitude;
+    OB_OPERATION_REGISTRATION *OperationRegistration;
+} OB_CALLBACK_REGISTRATION, *POB_CALLBACK_REGISTRATION;
+
+NTSTATUS ObRegisterCallbacks(POB_CALLBACK_REGISTRATION CallbackRegistration, PVOID *RegistrationHandle);
+void ObUnregisterCallbacks(PVOID RegistrationHandle);
+
+/* Handle Tables */
+typedef struct _HANDLE_TABLE_ENTRY {
+    union {
+        PVOID Object;
+        ULONG_PTR ObAttributes;
+        ULONG_PTR Value;
+    };
+    union {
+        ACCESS_MASK GrantedAccess;
+        struct {
+            USHORT GrantedAccessIndex;
+            USHORT CreatorBackTraceIndex;
+        };
+        LONG NextFreeTableEntry;
+    };
+} HANDLE_TABLE_ENTRY, *PHANDLE_TABLE_ENTRY;
+
+#define TABLE_ENTRIES_PER_PAGE (PAGE_SIZE / sizeof(HANDLE_TABLE_ENTRY))
+
+typedef struct _HANDLE_TABLE {
+    ULONG_PTR TableCode;
+    struct _EPROCESS *QuotaProcess;
+    PVOID UniqueProcessId;
+    EX_PUSH_LOCK HandleTableLock;
+    LIST_ENTRY HandleTableList;
+    EX_PUSH_LOCK HandleContentionEvent;
+    ULONG HandleCount;
+    ULONG FirstFreeHandle;
+} HANDLE_TABLE, *PHANDLE_TABLE;
+
+PHANDLE_TABLE ExCreateHandleTable(struct _EPROCESS *Process);
+void ExDestroyHandleTable(PHANDLE_TABLE HandleTable, PVOID DestroyHandleEntry);
+HANDLE_TABLE_ENTRY *ExpAllocateHandleTableEntry(PHANDLE_TABLE HandleTable, PHANDLE Handle);
+BOOLEAN ExpFreeHandleTableEntry(PHANDLE_TABLE HandleTable, HANDLE Handle);
+PHANDLE_TABLE_ENTRY ExpLookupHandleTableEntry(PHANDLE_TABLE HandleTable, HANDLE Handle);
+
+/* Security Token & Impersonation */
+typedef struct _TOKEN {
+    DISPATCHER_HEADER Header;
+    EX_RUNDOWN_REF Rundown;
+    LUID TokenId;
+    LUID AuthenticationId;
+    LUID ModifiedId;
+    TOKEN_TYPE TokenType;
+    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
+    ULONG TokenFlags;
+    ULONG UserAndGroupCount;
+    ULONG RestrictedSidCount;
+    ULONG PrivilegeCount;
+    PVOID UserAndGroups;
+    PVOID RestrictedSids;
+    PVOID Privileges;
+    PVOID DynamicCharged;
+    PVOID DynamicSubCharged;
+    PVOID SecurityDescriptor;
+} TOKEN, *PTOKEN;
+
+NTSTATUS SeCreateClientSecurity(struct _ETHREAD *Thread, PSECURITY_QUALITY_OF_SERVICE Qos, BOOLEAN RemoteClient, PVOID ClientContext);
+NTSTATUS SeImpersonateClientEx(PVOID ClientContext, struct _ETHREAD *ServerThread);
+BOOLEAN SeSinglePrivilegeCheck(LUID PrivilegeValue, KPROCESSOR_MODE PreviousMode);
+NTSTATUS PsImpersonateClient(struct _ETHREAD *Thread, PTOKEN Token, BOOLEAN CopyOnOpen, BOOLEAN EffectiveOnly, SECURITY_IMPERSONATION_LEVEL ImpersonationLevel);
+void PsRevertToSelf(void);
+
+/* Large Pages & Pagefile Management */
+#define MM_LARGE_PAGE_SIZE (2 * 1024 * 1024) /* 2MB large page */
+#define MM_HUGE_PAGE_SIZE  (1024 * 1024 * 1024) /* 1GB page */
+
+#define _PAGE_LARGE 0x80
+
+typedef struct _MMPAGING_FILE {
+    ULONG_PTR Size;
+    ULONG_PTR MaximumSize;
+    ULONG_PTR MinimumSize;
+    ULONG_PTR FreeSpace;
+    ULONG_PTR CurrentUsage;
+    struct _FILE_OBJECT *FileObject;
+    UNICODE_STRING PageFileName;
+    ULONG PageFileNumber;
+    BOOLEAN Extended;
+    BOOLEAN HintPfn;
+    PRTL_BITMAP Bitmap;
+} MMPAGING_FILE, *PMMPAGING_FILE;
+
+PVOID MiAllocateLargePages(ULONG NumberOfPages);
+void MiFreeLargePages(PVOID BaseAddress, ULONG NumberOfPages);
+NTSTATUS MmCreatePageFile(PUNICODE_STRING FileName, PLARGE_INTEGER InitialSize, PLARGE_INTEGER MaximumSize, ULONG Priority);
+ULONG_PTR MiAllocatePageFileSlot(PMMPAGING_FILE PageFile);
+void MiFreePageFileSlot(PMMPAGING_FILE PageFile, ULONG_PTR SlotIndex);
 
 #endif /* _NTOSKRNL_RECONSTRUCTED_H_ */

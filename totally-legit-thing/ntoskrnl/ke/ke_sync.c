@@ -81,67 +81,7 @@ void KeReleaseSpinLock(PKSPIN_LOCK SpinLock, KIRQL NewIrql)
     __writecr8(NewIrql);
 }
 
-/**
- * Puts the current thread into a wait state on a dispatcher object.
- * Disassembly @ 0x00192EB0:
- *   mov %gs:0x188, %rdi         ; rdi = KPCR.CurrentThread
- *   btrl $0x2, 0x74(%rdi)       ; Clear auto-boost flag
- *   mov %cr8, %rsi              ; Save CurrentIrql
- *   mov $0x2, %r15              ; DISPATCH_LEVEL
- *   mov %r15, %cr8              ; Raise to DISPATCH_LEVEL
- *   ...
- *   test DispatcherHeader->SignalState
- */
-NTSTATUS KeWaitForSingleObject(
-    PVOID Object,
-    uint32_t WaitReason,
-    KPROCESSOR_MODE WaitMode,
-    BOOLEAN Alertable,
-    int64_t *Timeout)
-{
-    DISPATCHER_HEADER *Header = (DISPATCHER_HEADER*)Object;
-    KIRQL OldIrql = 0;
-
-    if (!Object) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    /* 1. Raise IRQL to DISPATCH_LEVEL to synchronize dispatcher state */
-    OldIrql = (KIRQL)__readcr8();
-    __writecr8(DISPATCH_LEVEL);
-
-    /*
-     * 2. Inspect DispatcherHeader signal state:
-     *    If SignalState > 0, the object is signaled.
-     */
-    if (Header->SignalState > 0) {
-        /* If SynchronizationEvent or SynchronizationTimer, auto-reset signal state */
-        if (Header->Type == SynchronizationEvent || Header->Type == SynchronizationTimer) {
-            Header->SignalState--;
-        }
-        /* NotificationEvent / NotificationTimer remains signaled */
-
-        /* Restore IRQL and return immediately */
-        __writecr8(OldIrql);
-        return STATUS_SUCCESS;
-    }
-
-    /*
-     * 3. Object is not signaled:
-     *    If Timeout == 0, return STATUS_TIMEOUT immediately without waiting.
-     */
-    if (Timeout && *Timeout == 0) {
-        __writecr8(OldIrql);
-        return STATUS_TIMEOUT;
-    }
-
-    /*
-     * 4. Thread must block:
-     *    Insert thread into WaitListHead circular list and invoke KiSwapThread.
-     */
-    __writecr8(OldIrql);
-    return STATUS_SUCCESS;
-}
+/* KeWaitForSingleObject is implemented comprehensively in ke_dispatcher.c */
 
 /**
  * Acquires an executive fast mutex, raising IRQL to APC_LEVEL.
@@ -210,48 +150,4 @@ void ExReleaseFastMutex(PFAST_MUTEX FastMutex)
     __writecr8(OldIrql);
 }
 
-/**
- * Acquires an executive push lock for exclusive access.
- * Disassembly @ 0x00194410 (RVA 0x00219410):
- *   lock btsq $0x0, (%rcx)      ; Test and set locked bit (bit 0)
- *   jc slow_path
- */
-void ExAcquirePushLockExclusiveEx(PEX_PUSH_LOCK PushLock, ULONG Flags)
-{
-    ULONG_PTR Expected = 0;
-    ULONG_PTR Desired = 1; /* Locked bit = 1 */
-
-    if (!PushLock) {
-        return;
-    }
-
-    /* Fast-path: atomic compare and exchange lock bit */
-    while (!__atomic_compare_exchange_n(
-        &PushLock->Value,
-        &Expected,
-        Desired,
-        false,
-        __ATOMIC_ACQUIRE,
-        __ATOMIC_RELAXED))
-    {
-        Expected = 0;
-        __asm__ __volatile__("pause");
-    }
-}
-
-/**
- * Releases an exclusive executive push lock.
- * Disassembly @ 0x001F5110 (RVA 0x0027A110):
- *   lock andq $~1, (%rcx)       ; Clear locked bit
- *   testq $2, (%rcx)            ; Test waiting bit
- *   jnz wake_waiters
- */
-void ExReleasePushLockExclusiveEx(PEX_PUSH_LOCK PushLock, ULONG Flags)
-{
-    if (!PushLock) {
-        return;
-    }
-
-    /* Clear Locked bit */
-    __atomic_and_fetch(&PushLock->Value, ~1ULL, __ATOMIC_RELEASE);
-}
+/* Executive push locks are implemented in ntoskrnl/ex/ex_pushlock.c */

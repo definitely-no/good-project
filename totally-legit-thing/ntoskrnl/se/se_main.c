@@ -184,3 +184,62 @@ void SeReleaseSubjectContext(PSECURITY_SUBJECT_CONTEXT SubjectContext)
     SubjectContext->ClientToken = NULL;
     SubjectContext->PrimaryToken = NULL;
 }
+
+/**
+ * SeCreateClientSecurity (RVA 0x008B1F80)
+ */
+NTSTATUS SeCreateClientSecurity(struct _ETHREAD *Thread, PSECURITY_QUALITY_OF_SERVICE Qos, BOOLEAN RemoteClient, PVOID ClientContext)
+{
+    if (!ClientContext || !Qos) return STATUS_INVALID_PARAMETER;
+
+    PTOKEN Token = NULL;
+    if (Thread && Thread->ImpersonationInfo) {
+        Token = (PTOKEN)Thread->ImpersonationInfo;
+    } else {
+        PEPROCESS Proc = PsGetCurrentProcess();
+        Token = Proc ? (PTOKEN)Proc->Token : NULL;
+    }
+
+    if (!Token) return STATUS_NO_TOKEN;
+
+    *(PTOKEN*)ClientContext = Token;
+    return STATUS_SUCCESS;
+}
+
+/**
+ * SeImpersonateClientEx (RVA 0x0084F420)
+ */
+NTSTATUS SeImpersonateClientEx(PVOID ClientContext, struct _ETHREAD *ServerThread)
+{
+    if (!ClientContext) return STATUS_INVALID_PARAMETER;
+    if (!ServerThread) ServerThread = PsGetCurrentThread();
+
+    PTOKEN Token = *(PTOKEN*)ClientContext;
+    ServerThread->ImpersonationInfo = Token;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+ * PsImpersonateClient (RVA 0x0084F470)
+ */
+NTSTATUS PsImpersonateClient(struct _ETHREAD *Thread, PTOKEN Token, BOOLEAN CopyOnOpen, BOOLEAN EffectiveOnly, SECURITY_IMPERSONATION_LEVEL ImpersonationLevel)
+{
+    if (!Thread) Thread = PsGetCurrentThread();
+    if (!Thread) return STATUS_INVALID_PARAMETER;
+
+    Thread->ImpersonationInfo = Token;
+    return STATUS_SUCCESS;
+}
+
+/**
+ * PsRevertToSelf (RVA 0x0099D4A0)
+ */
+void PsRevertToSelf(void)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    if (Thread) {
+        Thread->ImpersonationInfo = NULL;
+    }
+}
+
